@@ -1,0 +1,245 @@
+---
+title: "Lab 2 Scratch"
+author: "Daniel Costa, Bella Davies"
+date: "2024-11-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(stargazer)
+```
+
+```{r Data Wrangling}
+# Load Communities
+df <- read.csv("Data/1.0-communities.csv") %>%
+  mutate(state_county = paste(State.Territory, County.Name))
+head(df)
+
+# Load CBSA
+cbsa <- read.csv("Data/CBSAs.csv") %>%
+  mutate(state_county = paste(State.Name, County.County.Equivalent))
+head(cbsa)
+
+# just percent white and percent risk of fire
+# for each census tract, get their total number of white, total population, and number of properties at risk of fire
+# then, group by the CBSA code
+# then, get Percent White and Percent at Risk
+# then, run an lm
+
+df_join <- merge(x = df, y = cbsa, by.x = "state_county", by.y = "state_county")
+
+df_fire <- df_join %>% 
+  mutate(n_white = Total.population*Percent.White,
+         n_housing_burden = Total.population*Housing.burden..percent./100,
+         n_poverty = Total.population*Adjusted.percent.of.individuals.below.200..Federal.Poverty.Line/100,
+         n_no_hs_degree = Total.population*Percent.individuals.age.25.or.over.with.less.than.high.school.degree/100,
+         n_fire_risk = Total.population*Share.of.properties.at.risk.of.fire.in.30.years/100) %>%
+  group_by(CBSA.Code) %>%
+  summarise(total_white = sum(n_white),
+            total_fire_risk = sum(n_fire_risk),
+            total_population = sum(Total.population), 
+            total_low_income = sum(as.logical(Is.low.income.)),
+            total_housing_burden = sum(n_housing_burden),
+            total_poverty = sum(n_poverty),
+            total_no_hs_degree = sum(n_no_hs_degree)) %>%
+  mutate(percent_white = 100*total_white/total_population,
+         percent_fire_risk = 100*total_fire_risk/total_population,
+         percent_low_income = 100*total_low_income/total_population,
+         percent_housing_burden = 100*total_housing_burden/total_population,
+         percent_poverty = 100*total_poverty/total_population,
+         percent_no_hs_degree = 100*total_poverty/total_population)%>%
+  drop_na() 
+
+head(df_fire)
+```
+
+```{r Splitting Data for EDA}
+n <- nrow(df_fire)
+cat("Number of rows in the cleaned (100%) set: ", n, "\n")
+
+# Set the seed for reproducibility (optional)
+set.seed(123)
+
+# Calculate the number of rows for 30% of the data
+split_index <- floor(0.3 * n)  # 30% of the total rows
+
+# Generate a random sample of row indices for the 30% split
+eda_indices <- sample(1:n, split_index)
+
+# Create the two subsets: 30% (train) and 70% (test)
+df_eda <- df_fire[eda_indices, ]
+df_model <- df_fire[-eda_indices, ]
+
+# Print the number of rows in each set
+cat("Number of rows in the analysis (30%) set: ", nrow(df_eda), "\n")
+cat("Number of rows in the modeling (70%) set: ", nrow(df_model), "\n")
+```
+
+```{r Visualizations: percent_fire_risk (Y)}
+# Histogram for Y (percent_fire_risk)
+hist(df_eda$percent_fire_risk, 
+     main = "Histogram of Percent Fire Risk", 
+     xlab = "Percent Fire Risk", 
+     col = "red", 
+     breaks = 30)
+# Log(Y)
+hist(log(df_eda$percent_fire_risk), 
+     main = "Histogram of Log(Percent Fire Risk)", 
+     xlab = "Log(Percent Fire Risk)", 
+     col = "red", 
+     breaks = 30)
+```
+
+```{r X1 Visualizations: Percent White}
+# X1 Distribution
+hist(df_eda$percent_white, 
+     main = "Histogram of Percent White", 
+     xlab = "Percent White", 
+     col = "blue", 
+     breaks = 30)
+
+# X1^2 Distribution
+hist((df_eda$percent_white)^2, 
+     main = "Histogram of Percent White^2", 
+     xlab = "Percent White^2", 
+     col = "blue", 
+     breaks = 30)
+
+# X1 vs. Y Relationship
+df_eda %>% ggplot(aes(x=percent_white, y=percent_fire_risk)) +
+  geom_point() + geom_smooth() + 
+  ggtitle('Percent White vs. Percent Fire Risk')
+
+# X1 vs.Log(Y) Relationship
+df_eda %>% ggplot(aes(x=percent_white, y=log(percent_fire_risk))) +
+  geom_point() + geom_smooth() + 
+  ggtitle('Percent White vs. Log(Percent Fire Risk)')
+
+# X1^2 vs Log(Y) Relationship
+df_eda %>% ggplot(aes(x=(percent_white)^2, y=log(percent_fire_risk))) +
+  geom_point() + geom_smooth() + 
+  ggtitle('(Percent White)^2 vs. Log(Percent Fire Risk)')
+```
+
+```{r X2 Visualizations: percent_low_income}
+# X2 Distribution
+hist(df_eda$percent_low_income, 
+     main = "Histogram of Percent Low Income", 
+     xlab = "Percent Low Income", 
+     col = "blue", 
+     breaks = 30)
+
+# Log(X2) Distribution
+hist(log(df_eda$percent_low_income), 
+     main = "Histogram of Log(Percent Low Income)", 
+     xlab = "Log(Percent Low Income)", 
+     col = "blue", 
+     breaks = 30)
+
+# X2 vs. Y Relationship
+df_eda %>% ggplot(aes(x=percent_low_income, y=percent_fire_risk)) +
+  geom_point() + geom_smooth()+
+  ggtitle('Percent Low Income vs. Percent Fire Risk')
+
+# X2 vs. Log(Y) Relationship
+df_eda %>% ggplot(aes(x=percent_low_income, y=log(percent_fire_risk))) +
+  geom_point() + geom_smooth()+
+  ggtitle('Percent Low Income vs. Log(Percent Fire Risk)')
+
+# Log(X2) vs. Log(Y) Relationship
+df_eda %>% ggplot(aes(x=log(percent_low_income), y=log(percent_fire_risk))) +
+  geom_point() + geom_smooth()+
+  ggtitle('Log(Percent Low Income) vs. Log(Percent Fire Risk)')
+```
+
+```{r X3 Visualizations: percent_housing_burden}
+
+# X3 Histogram
+hist(df_eda$percent_housing_burden, 
+     main = "Histogram of Percent Housing Burden", 
+     xlab = "Percent Housing Burden", 
+     col = "blue", 
+     breaks = 30)
+
+# X3 vs. Y Relationship
+df_eda %>% ggplot(aes(x=percent_housing_burden, y=percent_fire_risk)) +
+  geom_point() + geom_smooth()+
+  ggtitle('Percent Housing Burden vs. Percent Fire Risk')
+
+# X3 vs. Log(Y) Relationship
+df_eda %>% ggplot(aes(x=percent_housing_burden, y=log(percent_fire_risk))) +
+  geom_point() + geom_smooth()+
+  ggtitle('Percent Housing Burden vs. Percent Fire Risk')
+```
+
+```{r X4 Visualizations: percent_poverty}
+# X4 Histogram
+hist(df_eda$percent_housing_burden, 
+     main = "Histogram of Percent Housing Burden", 
+     xlab = "Percent Housing Burden", 
+     col = "blue", 
+     breaks = 30)
+
+# X4 vs. Y Relationship
+df_eda %>% ggplot(aes(x=percent_poverty, y=percent_fire_risk)) +
+  geom_point() + geom_smooth()+
+  ggtitle('Percent Poverty vs. Percent Fire Risk')
+
+# X4 vs. Log(Y) Relationship
+df_eda %>% ggplot(aes(x=percent_poverty, y=log(percent_fire_risk))) +
+  geom_point() + geom_smooth()+
+  ggtitle('Percent Poverty vs. Percent Fire Risk')
+```
+
+```{r X5 Visualizations: percent_no_hs_degree}
+# X5 Histogram
+hist(df_eda$percent_no_hs_degree, 
+     main = "Histogram of Percent Housing Burden", 
+     xlab = "Percent Housing Burden", 
+     col = "blue", 
+     breaks = 30)
+
+# X5 vs. Y Relationship
+df_eda %>% ggplot(aes(x=percent_no_hs_degree, y=percent_fire_risk)) +
+  geom_point() + geom_smooth()+
+  ggtitle('Percent Under 25 Without HS Degree vs. Percent Fire Risk')
+
+# X5 vs. Log(Y) Relationship
+df_eda %>% ggplot(aes(x=percent_no_hs_degree, y=log(percent_fire_risk))) +
+  geom_point() + geom_smooth()+
+  ggtitle('Percent Under 25 Without HS Degree vs. Percent Fire Risk')
+```
+
+```{r Modeling}
+model_1 <- lm(percent_fire_risk ~ percent_white, data=df_model)
+model_2 <- lm(percent_fire_risk ~ percent_white + percent_low_income, data=df_model)
+model_3 <- lm(percent_fire_risk ~ percent_white + percent_housing_burden, data=df_model)
+model_4 <- lm(percent_fire_risk ~ percent_white + percent_poverty, data=df_model)
+model_5 <- lm(percent_fire_risk ~ percent_white + percent_no_hs_degree, data=df_model)
+model_6 <- lm(percent_fire_risk ~ percent_white + percent_low_income + percent_housing_burden + percent_poverty + percent_no_hs_degree, data=df_model)
+
+```
+
+```{r}
+# Percent White and Percent Low Income
+model_1 <- lm(percent_fire_risk ~ percent_white + percent_low_income, data=df_model)
+model_2 <- lm(log(percent_fire_risk+1) ~ (percent_white)^2 + log(percent_low_income+1), data=df_model)
+
+# Percent White and Percent Housing Burden
+model_3 <- lm(percent_fire_risk ~ percent_white + percent_housing_burden, data=df_model)
+model_4 <- lm(log(percent_fire_risk+1) ~ (percent_white)^2 + percent_housing_burden, data=df_model)
+
+# Percent White and Percent Poverty
+model_5 <- lm(percent_fire_risk ~ percent_white + percent_poverty, data=df_model)
+model_6 <- lm(log(percent_fire_risk+1) ~ (percent_white)^2 + percent_poverty, data=df_model)
+```
+
+```{r}
+stargazer(model_1, model_2, model_3, model_4, model_5, model_6,
+          type = "text",  # You can change this to "html" or "latex" depending on the output format you want
+          title = "Regression Results", 
+          digits = 3,     # Number of decimal places
+          star.cutoffs = c(0.05, 0.01, 0.001))
+```

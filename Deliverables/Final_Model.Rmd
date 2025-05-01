@@ -1,0 +1,368 @@
+---
+title: "Lab 2 Scratch"
+author: "Daniel Costa, Bella Davies, Nicolas Aragon"
+date: "2024-12-07"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+### Imports
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(lmtest)
+library(tidyverse)
+library(stargazer)
+library(sandwich)
+library(patchwork)
+#library(mapview)
+#library(tidycensus)
+#library(tigris)
+library(sf)
+library(dplyr)
+library(tidyr)
+library(stringr)
+```
+
+```{r Load Data}
+# Function to clean formatting of state counties
+substrRight <- function(x, n){
+  substr(x, nchar(x)-n+1, nchar(x))
+}
+# Load Communities
+# From https://screeningtool.geoplatform.gov/en/downloads#3/33.47/-97.5
+# Under "Community List Data"
+df <- read.csv("../Data/EPA_Data.csv") %>%
+  mutate(state_county = paste0(str_trim(County.Name, side = "both"), ", ", str_trim(State.Territory, side = "both")))
+head(df)
+# Load CBSA
+cbsa <- read.csv("../Data/CBSAs.csv") %>%
+  mutate(state_county = paste0(str_trim(County.County.Equivalent, side = "both"), ", ", str_trim(State.Name, side = "both")),
+         state_abbr = substrRight(CBSA.Title, 2))
+head(cbsa)
+```
+
+```{r Data Wrangling}
+# Join data by state counties
+df_join <- merge(x = df, y = cbsa, by.x = "state_county", by.y = "state_county")
+# Define East and West states for mutating the new 'Region' indicator variable
+east_states <- c("MI", "OH",  "GA",
+  "NY", "NC",  "AL",  "NJ", "PA", 
+  "MA", "IN", "WI", "FL", "TN", "SC", "ME",
+    "MD", "VT",  "WV",  "VA",
+    "IL", "NH", "KY",  "CT", "MS", "DE")
+west_states <- c("SD", "WA", "TX", "OK", "NM", "CO",
+ "OR", "MN","LA", "IA", "AR", "KS", "CA", "NE",
+ "MT", "ND", "ID", "MO", "NV", "WY", "UT", "AZ")
+# For each census tract, get their sum total counts for the variables, 
+# then divide by the population in each tract to get the percentage of each variable per tract
+df_fire <- df_join %>% 
+  mutate(n_white = Total.population*Percent.White,
+         n_housing_burden = Total.population*Housing.burden..percent./100,
+         n_poverty = Total.population*Adjusted.percent.of.individuals.below.200..Federal.Poverty.Line/100,
+         n_no_hs_degree = Total.population*Percent.individuals.age.25.or.over.with.less.than.high.school.degree/100,
+         n_fire_risk = Total.population*Share.of.properties.at.risk.of.fire.in.30.years/100,
+         region_west = ifelse(state_abbr %in% east_states, "East", "West")) %>%
+  group_by(CBSA.Code, region_west) %>%
+  summarise(total_white = sum(n_white),
+            total_fire_risk = sum(n_fire_risk),
+            total_population = sum(Total.population), 
+            total_housing_burden = sum(n_housing_burden),
+            total_poverty = sum(n_poverty),
+            total_no_hs_degree = sum(n_no_hs_degree),
+            .groups = "keep") %>%  # keep the grouping
+  mutate(percent_white = 100*total_white/total_population,
+         percent_fire_risk = 100*total_fire_risk/total_population,
+         percent_housing_burden = 100*total_housing_burden/total_population,
+         percent_poverty = 100*total_poverty/total_population,
+         percent_no_hs_degree = 100*total_no_hs_degree/total_population)%>%
+  drop_na() 
+head(df_fire)
+```
+
+```{r Splitting Data for EDA}
+n <- nrow(df_fire)
+cat("Number of rows in the cleaned (100%) set: ", n, "\n")
+# Set the seed for reproducibility (optional)
+set.seed(123)
+# Calculate the number of rows for 30% of the data
+split_index <- floor(0.3 * n)  # 30% of the total rows
+# Generate a random sample of row indices for the 30% split
+eda_indices <- sample(1:n, split_index)
+# Create the two subsets: 30% (train) and 70% (test)
+df_eda <- df_fire[eda_indices, ]
+df_model <- df_fire[-eda_indices, ]
+# Print the number of rows in each set
+cat("Number of rows in the analysis (30%) set: ", nrow(df_eda), "\n")
+cat("Number of rows in the modeling (70%) set: ", nrow(df_model), "\n")
+```
+
+```{r Correlation Matrix}
+# Select only columns of interest from the df_eda 
+subset_df <- df_eda[, c("percent_white", "region_west", "percent_fire_risk")]
+subset_df$region_west <- ifelse(subset_df$region_west == "West", 1, 0)
+# Compute the correlation matrix for the selected columns
+cor_matrix <- cor(subset_df)
+# Display the correlation matrix
+cor_matrix
+```
+
+```{r Data Wrangling for Map Visualizations Below}
+# Group by counties for the map
+getStateAbbr <- function(state_name){
+  state.abb[match(state_name, state.name)]
+}
+df_counties <- df %>%
+  mutate(n_white = Total.population*Percent.White,
+         n_fire_risk = Total.population*Share.of.properties.at.risk.of.fire.in.30.years/100) %>%
+  drop_na(n_fire_risk, n_white) %>%
+  group_by(State.Territory, state_county) %>%
+  summarise(total_white = sum(n_white),
+            total_fire_risk = sum(n_fire_risk),
+            total_population = sum(Total.population)) %>% 
+  mutate(percent_white = 100*total_white/total_population,
+         percent_fire_risk = 100*total_fire_risk/total_population,
+         state_abbr = getStateAbbr(State.Territory),
+         region = ifelse(state_abbr %in% east_states, "East", "West"),
+         type = ifelse(state_county %in% cbsa$state_county, "Metropolitan", "Rural"))
+# (long) video tutorial for get_acs: https://www.youtube.com/watch?v=ahPquLT6gxA
+# get_acs documentation: https://www.rdocumentation.org/packages/tidycensus/versions/1.6.7/topics/get_acs
+# mapview documentation: https://r-spatial.github.io/mapview/
+# more mapview docs: https://www.rdocumentation.org/packages/mapview/versions/2.11.2/topics/mapView
+usa_geom <- get_acs(
+  geography = "county",
+  variables = "B19013_001",
+  year = 2010,
+  state = c("SD", "WA", "TX", "OK", "MI", "OH", "NM", "CO", "GA", "OR", "NY", "NC", "MN", "AL", "LA", "NJ", "PA", "IA", "MA", "IN", "WI", "FL", "AR", "KS", "TN", "SC", "ME", "CA", "MD", "VT", "NE", "WV", "MT", "ND", "ID", "VA", "IL", "NH", "KY", "MO", "CT", "MS", "NV", "WY", "UT", "DE", "AZ"),
+  geometry = TRUE)
+# sorting is necessary for the shapes to render correctly
+usa_sorted <- usa_geom[order(usa_geom$GEOID),,drop=FALSE] %>%
+  mutate(area = as.numeric(st_area(geometry))) %>%
+  filter(area > 0)
+# get_acs returns a specialized data.frame, if you join with it, always left
+# join with the get_acs df on the left
+Counties <- usa_sorted %>%
+  left_join(df_counties, by = join_by(x$NAME == y$state_county))
+Counties$log_percent_fire_risk <- log(Counties$percent_fire_risk + 1)
+```
+
+```{r Histogram Percent Fire Risk}
+# Histogram for Y (percent_fire_risk)
+hist(df_eda$percent_fire_risk, 
+     main = "Histogram of Percent Fire Risk", 
+     xlab = "Percent Fire Risk", 
+     col = "red", 
+     breaks = 30)
+# Log(Y+1)
+```
+
+
+```{r Histogram log(percent_fire_risk+1)}
+
+hist(log(df_eda$percent_fire_risk+1), 
+     main = "Histogram of Log(Percent Fire Risk+1)", 
+     xlab = "Log(Percent Fire Risk + 1)", 
+     col = "red", 
+     breaks = 30)
+
+```
+```{r mapview firerisk}
+# Map of Y (Percent Fire Risk)
+# zcol determines shading, hover over a region to see its zcol value,
+# click on it to see all its attributes in Counties
+mapview(Counties, zcol = "percent_fire_risk", legend = TRUE, layer = "Percent Fire Risk")
+```
+
+```{r Histogram Percent Fire Risk by Region}
+# Histogram for Y (percent_fire_risk) by Region
+df_eda %>%
+  ggplot(aes(x = percent_fire_risk, fill = as.factor(region_west))) +
+  geom_histogram(color = "black", bins = 30, alpha = 0.7) +
+  facet_wrap(~ region_west) +
+  ggtitle("Histogram of Percent Fire Risk by Region") +
+  labs(x = "Percent Fire Risk", y = "Frequency", fill = "Region") +
+  scale_fill_manual(values = c("East" = "blue", "West" = "red")) +
+  theme_minimal()
+
+```
+```{r mapview region_west}
+# X1 Bar Graph of region_west Indicator Variable
+ggplot(df_eda, aes(x = region_west)) +
+  geom_bar(width = 0.4, fill="blue") +
+  labs(title = "Bar Graph of Region Variable", 
+       x = "Region", 
+       y = "Count") +
+  theme_minimal()
+# Map of X1 (region: East or West)
+# zcol determines shading, hover over a region to see its zcol value,
+# click on it to see all its attributes in Counties
+mapview(Counties, zcol = "region", legend = TRUE, layer.name = "Region")
+# Map of Type: Rural or Metropolitan
+
+```
+```{r mapview metro/rural}
+mapview(Counties, zcol = "type", legend = TRUE, layer.name = "Type")
+```
+
+
+
+```{r X2 Visualizations: Percent White}
+# X2 Distribution
+hist(df_eda$percent_white, 
+     main = "Histogram of Percent White", 
+     xlab = "Percent White", 
+     col = "blue", 
+     breaks = 30)
+# X2^2 Distribution
+hist((df_eda$percent_white)^3, 
+     main = "Histogram of Percent White^2", 
+     xlab = "Percent White^2", 
+     col = "blue", 
+     breaks = 30)
+# X2 vs. Y Relationship
+df_eda %>% ggplot(aes(x=percent_white, y=percent_fire_risk)) +
+  geom_point() + geom_smooth() + 
+  ggtitle('Percent White vs. Percent Fire Risk') + 
+  facet_wrap(~ region_west, 
+             labeller = as_labeller(c(`0` = "East", `1` = "West")))
+# X2 vs.Log(Y+1) Relationship
+df_eda %>% ggplot(aes(x=percent_white, y=log(percent_fire_risk+1))) +
+  geom_point() + geom_smooth() + 
+  ggtitle('Percent White vs. Log(Percent Fire Risk+1)')
+# X2^2 vs Log(Y+1) Relationship
+df_eda %>% ggplot(aes(x=(percent_white)^2, y=log(percent_fire_risk+1))) +
+  geom_point() + geom_smooth() + 
+  ggtitle('(Percent White)^2 vs. Log(Percent Fire Risk+1)')
+# Map of X2 (Percent White)
+mapview(Counties, zcol = "percent_white", legend = TRUE, layer.name = "Percent White")
+```
+
+```{r Visualizations: percent_white (X2) by Region}
+# Histogram for X2 (split by region)
+df_eda %>%
+  ggplot(aes(x = percent_white, fill = as.factor(region_west))) +
+  geom_histogram(color = "black", bins = 30, alpha = 0.7) +
+  facet_wrap(~ region_west) +
+  ggtitle("Histogram of Percent White by Region") +
+  labs(x = "Percent White", y = "Frequency", fill = "Region") +
+  scale_fill_manual(values = c("blue", "red")) +
+  theme_minimal()
+
+```
+
+```{r}
+# X2 vs.Log(Y+1) Relationship by Region
+df_eda %>% ggplot(aes(x=percent_white, y=percent_fire_risk)) +
+  geom_point() + geom_smooth() + 
+  ggtitle('Percent White vs. Percent Fire Risk') + 
+  facet_wrap(~ region_west) +
+  labs(x = "Percent White", y = "Percent Fire Risk") +
+  theme_minimal()
+
+```
+
+### Model Specification
+
+```{r Full Model Specification}
+# Non transformed models
+eda_model_1 <- lm(percent_fire_risk ~ percent_white, data=df_eda)
+eda_model_2 <- lm(percent_fire_risk ~ percent_white + region_west, data=df_eda)
+# Transformed models
+eda_model_3 <- lm(log(percent_fire_risk+1) ~ percent_white, data=df_eda)
+eda_model_4 <- lm(log(percent_fire_risk+1) ~ percent_white + region_west, data=df_eda)
+# Stargazer table
+stargazer(eda_model_1, eda_model_2, eda_model_3, eda_model_4,
+          type = "text",
+          title = "Regression Results", 
+          digits = 3,     # Number of decimal places
+          star.cutoffs = c(0.05, 0.01, 0.001))
+```
+```{r}
+df_eda %>%
+  ggplot(aes(x=percent_white, y=eda_model_1$residuals)) +
+  geom_point() +
+  stat_smooth() +
+  labs(x = "Percent White",
+       y = "Residuals (Percent Fire Risk)",
+       title = "Percent White vs. Untransformed Residuals")
+
+
+```
+```{r}
+df_eda %>%
+  ggplot(aes(x=percent_white, y=eda_model_3$residuals)) +
+  geom_point() +
+  stat_smooth() +
+  labs(x = "Percent White",
+       y = "Residuals (Log(Percent Fire Risk + 1))",
+       title = "Percent White vs. Log Transformed Residuals")
+```
+
+
+
+```{r Final Model}
+final_model_4 <- lm(log(percent_fire_risk+1) ~ percent_white + region_west, data=df_model)
+stargazer(final_model_4,
+          type = "text",
+          title = "Regression Results", 
+          digits = 3,     # Number of decimal places
+          star.cutoffs = c(0.05, 0.01, 0.001))
+```
+
+```{r Plot of Log Predictions}
+# Add predicted values to the data frame
+df_predictions <- df_model %>%
+  ungroup() %>%
+  mutate(predictions = predict(final_model_4), # Predicted Values
+  residuals = log(percent_fire_risk + 1) - predictions) # Residuals
+# Create the plot
+df_predictions %>%
+  ggplot(aes(x = percent_white, y = final_model_4$residuals)) +
+  geom_point(alpha = 0.6, color="blue") +  # Scatter plot of actual data
+  geom_hline(yintercept = 0, linetype = "dashed", color = "red") +  # Reference line at 0
+  ggtitle("Final Model Percent White + Region vs. Residuals") +
+  labs(
+    x = "Percent White",
+    y = "Residuals (Log(Percent Fire Risk + 1))"
+  ) +
+  facet_wrap(~ region_west) +
+  theme_minimal()
+```
+```{r}
+# Create the same plot but split by Region
+df_predictions %>%
+  filter(region_west == "West") %>%
+  ggplot(aes(x = percent_white, y = percent_fire_risk)) +
+  geom_point(alpha = 0.6, color="blue") +  # Scatter plot of actual data
+  stat_function(fun = function(x){
+  exp(3.535 + 2.019*1 - 0.033*x) - 1
+}, aes(color = "Final Log Model")) + # Reference line at 0
+  ggtitle("Final Model Data (West) vs. Predictions") +
+  labs(
+    x = "Percent White (West)",
+    y = "Percent Fire Risk",
+    colour = "Predictions"
+  ) +  # Facet by region
+  theme_minimal()
+
+```
+
+```{r}
+
+# Create the same plot but split by Region
+df_predictions %>%
+  filter(region_west == "East") %>%
+  ggplot(aes(x = percent_white, y = percent_fire_risk)) +
+  geom_point(alpha = 0.6, color="blue") +  # Scatter plot of actual data
+  stat_function(fun = function(x){
+  exp(3.535 + 2.019*0 - 0.033*x) - 1
+}, aes(color = "Final Log Model")) + # Reference line at 0
+  ggtitle("Final Model Data (East) vs. Predictions") +
+  labs(
+    x = "Percent White (East)",
+    y = "Percent Fire Risk",
+    colour = "Predictions",
+  ) +  
+  theme_minimal() 
+```
